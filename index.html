@@ -81,6 +81,7 @@
 .gi-media-empty{grid-column:1/-1;min-height:170px;display:flex;flex-direction:column;justify-content:center;align-items:center;color:#7b93a5;text-align:center;padding:22px;overflow-wrap:anywhere}
 .gi-media-empty p{margin:9px 0 3px}.gi-media-empty small{font-size:12px}
 @media(max-width:480px){.gi-media-modal{width:calc(100vw - 18px);max-height:calc(100dvh - 24px)}.gi-media-modal .modal-head,.gi-media-modal .modal-body{padding-left:16px;padding-right:16px}.gi-media-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+ .gi-login-google{display:flex;width:100%;min-height:48px;align-items:center;justify-content:center;font-size:13px;margin:18px auto 0}.gi-login-fallback{text-align:center;margin:16px 0}.gi-login-fallback summary{font-size:11px;color:#738996;cursor:pointer;line-height:1.5}.gi-login-fallback .login-google{margin-top:14px}
 </style>
 <script src="/roteiros.js?v=20261023"></script>
 </head>
@@ -183,25 +184,58 @@ async function gapi(url,opts={}){if(!googleToken)throw Error('Conecte sua conta 
 const gpost=(url,obj)=>gapi(url,{method:'POST',body:JSON.stringify(obj)});
 const driveList=async(q)=>{const url=`${DRIVE}/files?q=${encodeURIComponent(q)}&fields=${encodeURIComponent('nextPageToken,files(id,name,mimeType,parents,webViewLink)')}&page_size=100`;return (await gapi(url)).files||[]};
 async function loadGoogleConfig(){googleConfig={clientId:'',clientsSheetId:'',crmSheetId:'',status:'loading',error:''};if(page==='integrations')renderContent();try{const response=await fetch('/api/config',{method:'GET',cache:'no-store',headers:{Accept:'application/json'}});const data=await response.json();if(!response.ok)throw Error(data.error||`Falha na configuração (${response.status}).`);const clientId=String(data.googleClientId||'').trim();if(!/^[\w-]+\.apps\.googleusercontent\.com$/.test(clientId))throw Error('GOOGLE_CLIENT_ID inválido na Vercel.');googleConfig={clientId,clientsSheetId:String(data.clientsSheetId||''),crmSheetId:String(data.crmSheetId||''),status:'ready',error:''};if(googleConfig.crmSheetId){db.settings.sheetId=googleConfig.crmSheetId;db.settings.autoSync=true;save(false)}if(authState==='ready')startGoogleAutoReconnect();}catch(err){googleConfig={clientId:'',clientsSheetId:'',crmSheetId:'',status:'error',error:err.message||'Falha ao carregar configuração da Vercel.'};}if(page==='integrations')renderContent();if(authState!=='ready')renderLogin();}
-function requestGoogleToken({full=false,automatic=false}={}){
+// A single user gesture now both signs in and grants the CRM's Google permissions.
+function requestGoogleToken({full=false,automatic=false,forLogin=false}={}){
  if(googleConfig.status!=='ready'||!googleConfig.clientId)return automatic?undefined:toast('Configure o Client ID do Google na Vercel.',true);
  if(!window.google?.accounts?.oauth2)return automatic?undefined:toast('Google indisponível. Atualize a página.',true);
  try{
-  googleClient=window.google.accounts.oauth2.initTokenClient({client_id:googleConfig.clientId,scope:full?DRIVE_SCOPE:SCOPES,
+  googleClient=window.google.accounts.oauth2.initTokenClient({
+   client_id:googleConfig.clientId,
+   scope:forLogin?'openid email profile '+SCOPES:full?DRIVE_SCOPE:SCOPES,
    login_hint:authUser?.email||undefined,
    callback: async response=>{
-     if(response.error){cloudStatus='reconectar';cloudLastError=response.error_description||response.error;if(!automatic)toast('Google precisa de autorização: '+cloudLastError,true);renderContent();return;}
+     if(response.error||!response.access_token){
+       cloudStatus='reconectar';cloudLastError=response.error_description||response.error||'O Google não retornou um token.';
+       if(!automatic)toast('Google precisa de autorização: '+cloudLastError,true);
+       if(authState==='ready')renderContent();
+       return;
+     }
+     if(forLogin){
+       if(!window.google.accounts.oauth2.hasGrantedAllScopes(response,
+         'https://www.googleapis.com/auth/drive.file','https://www.googleapis.com/auth/spreadsheets')){
+         toast('É preciso permitir Drive e Planilhas para conectar tudo no login. Você também pode entrar sem essa conexão.',true);
+         return;
+       }
+       try{
+         const result=await fetch('/api/auth',{method:'POST',credentials:'same-origin',
+          headers:{'Content-Type':'application/json'},body:JSON.stringify({access_token:response.access_token})});
+         const payload=await result.json();
+         if(!result.ok)throw Error(payload.error||'Não foi possível concluir o login.');
+         authUser=payload.user;authState='ready';autoAuthAttempted=false;
+       }catch(err){toast(err.message||'Falha no login Google.',true);return;}
+     }
      googleToken=response.access_token;oauthTokenExpires=Date.now()+Math.max(30,Number(response.expires_in)||3600)*1000;
      driveAccess=full?'full':'basic';cloudStatus='sincronizando';cloudLastError='';
      if(googleConfig.crmSheetId){db.settings.sheetId=googleConfig.crmSheetId;db.settings.autoSync=true;save(false)}
-     render();if(full){openDrive('root');setTimeout(()=>giEnsurePendingFolders(),1100);}
+     render();
+     if(forLogin)startGoogleAutoReconnect();
+     if(full){openDrive('root');setTimeout(()=>giEnsurePendingFolders(),1100);}
      queueCloudSync(20);
-     if(!automatic)toast('Google autorizado. Sincronização automática ativada.');
+     if(!automatic)toast(forLogin?'Login realizado e Google conectado!':'Google autorizado. Sincronização automática ativada.');
    },
-   error_callback:err=>{cloudStatus='reconectar';cloudLastError='O Google não autorizou a conexão automática neste navegador.';if(!automatic)toast('Autorize a conta Google para sincronizar.',true);if(page==='integrations')renderContent();}
+   error_callback:err=>{
+     cloudStatus='reconectar';cloudLastError='O navegador não conseguiu concluir a autorização Google.';
+     if(!automatic)toast('Verifique se o navegador permite a janela de autorização do Google.',true);
+     if(page==='integrations'&&authState==='ready')renderContent();
+   }
   });
+  // Directly inside the user's click handler: avoids browsers blocking a popup
+  // opened asynchronously after the separate Google Sign-In callback.
   googleClient.requestAccessToken({prompt:automatic?'':'select_account'});
- }catch(err){cloudStatus='reconectar';cloudLastError=err.message||'Falha de autorização';if(!automatic)toast('Falha no Google: '+cloudLastError,true);}
+ }catch(err){
+   cloudStatus='reconectar';cloudLastError=err.message||'Falha de autorização';
+   if(!automatic)toast('Falha no Google: '+cloudLastError,true);
+ }
 }
 function connectGoogle(full=false){requestGoogleToken({full,automatic:false})}
 function startGoogleAutoReconnect(){if(!authUser||autoAuthAttempted||googleConfig.status!=='ready')return;autoAuthAttempted=true;
@@ -339,7 +373,7 @@ async function downloadData(){if(!googleToken)return toast('Autorize o Google ne
 async function projectFolder(pid){const project=db.projects.find(x=>x.id===pid);if(!project)return;if(project.driveFolderId){window.open(`https://drive.google.com/drive/folders/${encodeURIComponent(project.driveFolderId)}`,'_blank','noopener,noreferrer');return}if(!googleToken||!db.settings.folderId){toast('Conecte o Google e crie a base em Google e ajustes.',true);navigate('integrations');return}try{const folder=await gpost(`${DRIVE}/files?fields=id,name`,{name:`${project.title} - ${clientName(project.clientId)}`.slice(0,100),mimeType:'application/vnd.google-apps.folder',parents:[db.settings.folderId]});project.driveFolderId=folder.id;save();renderContent();toast('Pasta criada no Google Drive.');window.open(`https://drive.google.com/drive/folders/${encodeURIComponent(folder.id)}`,'_blank','noopener,noreferrer');}catch(err){toast('Erro ao criar pasta: '+err.message,true)}}
 
 // LOGIN. Backend validates Google ID token; no client-side role or password bypass.
-function renderLogin(){document.getElementById('app').innerHTML=`<main class="login-page"><div class="login-card"><img src="/icons/icon-512.png?v=3" alt="G&I"/><div class="eyebrow">G&I AGÊNCIA</div><h1>G&I Central</h1><p>Clientes, orçamentos, projetos e financeiro em um só lugar.</p>${authState==='loading'?'<p class="g-note">Verificando acesso...</p>':`<div id="google-login-btn" class="login-google"></div><p class="g-note">Acesso exclusivo aos e-mails autorizados pela agência.</p>${googleConfig.status==='error'?`<p class="g-note error">${e(googleConfig.error)}</p>`:''}`}</div></main>`;if(authState==='login')initLoginButton();}
+function renderLogin(){document.getElementById('app').innerHTML=`<main class="login-page"><div class="login-card"><img src="/icons/icon-512.png?v=3" alt="G&I"/><div class="eyebrow">G&I AGÊNCIA</div><h1>G&I Central</h1><p>Clientes, orçamentos, projetos e financeiro em um só lugar.</p>${authState==='loading'?'<p class="g-note">Verificando acesso...</p>':`<button type="button" class="btn primary gi-login-google" data-action="google-login-sync" ${googleConfig.status!=='ready'?'disabled':''}>Entrar com Google e conectar</button><p class="g-note">No primeiro acesso, o Google pode pedir permissão para usar Drive e Planilhas. Depois de autorizar, a sincronização começa ao entrar.</p><details class="gi-login-fallback"><summary>Entrar apenas no CRM (sem conectar o Google)</summary><div id="google-login-btn" class="login-google"></div><p class="g-note">O Drive e as Planilhas não serão conectados automaticamente por esta opção.</p></details><p class="g-note">Acesso exclusivo aos e-mails autorizados pela agência.</p>${googleConfig.status==='error'?`<p class="g-note error">${e(googleConfig.error)}</p>`:''}`}</div></main>`;if(authState==='login')initLoginButton();}
 let loginDrawTimer;
 function initLoginButton(){clearTimeout(loginDrawTimer);if(googleConfig.status!=='ready'||!window.google?.accounts?.id){loginDrawTimer=setTimeout(()=>{if(authState==='login')initLoginButton()},500);return;}window.google.accounts.id.initialize({client_id:googleConfig.clientId,callback:loginWithGoogle,auto_select:false});let box=document.getElementById('google-login-btn');if(box){box.innerHTML='';window.google.accounts.id.renderButton(box,{theme:'outline',size:'large',width:270,text:'signin_with'});}}
 async function loginWithGoogle(response){try{const r=await fetch('/api/auth',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({credential:response.credential})});const data=await r.json();if(!r.ok)throw Error(data.error||'Acesso não autorizado.');authUser=data.user;authState='ready';render();startGoogleAutoReconnect();}catch(err){toast(err.message,true);}}
@@ -611,7 +645,7 @@ async function giUploadClientMedia(cid,files){
 }
 
 // CLIQUES E FORMULÁRIOS
-function run(action,el){const type=el?.dataset.type,pid=el?.dataset.id;switch(action){case 'nav':navigate(el.dataset.page);break;case 'mobile-open':sidebarOpen=true;render();break;case 'mobile-close':sidebarOpen=false;render();break;case 'new':openModal(type,'',el.dataset.quick||'');break;case 'new-income':navigate('finances');openModal('finances','','income');break;case 'new-clients':openModal('clients');break;case 'gi-client-gallery':giOpenClientGallery(pid);break;case 'new-deals':openModal('deals');break;case 'new-projects':openModal('projects');break;case 'new-tasks':openModal('tasks');break;case 'new-scripts':openModal('scripts');break;case 'script-copy':GIRoteiros.copy(pid,{db,clientName,toast,download});break;case 'script-pdf':GIRoteiros.pdf(pid,{db,clientName,dateShort,e,toast});break;case 'edit':openModal(type,pid);break;case 'delete':removeEntity(type,pid);break;case 'modal-close':closeModal();break;case 'modal-close-bg':if(el===window.event?.target)closeModal();break;case 'show-lost':hideLost();break;case 'erase':localErase();break;case 'json-backup':download(`GI_backup_${iso()}.json`,JSON.stringify(db,null,2),'application/json;charset=utf-8');toast('Backup salvo.');break;case 'csv':exportCsv(type);break;case 'google-refresh-config':loadGoogleConfig();break;case 'google-connect':connectGoogle();break;case 'google-drive-connect':connectGoogle(true);break;case 'google-create':ensureBase();break;case 'google-upload':uploadData();break;case 'clients-sync-now':syncPendingClients();break;case 'google-download':downloadData();break;case 'project-folder':projectFolder(pid);break;case 'logout':logout();break;case 'quote-new':openQuote();break;case 'quote-edit':openQuote(pid);break;case 'quote-delete':deleteQuote(pid);break;case 'quote-print':printQuote(pid);break;case 'quote-row-add':addQuoteRow();break;case 'quote-row-remove':el.closest('tr')?.remove();updateQuoteTotals();break;case 'drive-open':openDrive(pid);break;case 'drive-up':openDrive('root');break;case 'drive-trash':trashDriveFile(pid);break;case 'drive-select':document.getElementById('drive-upload')?.click();break;case 'metadata-pick':document.getElementById('metadata-input')?.click();break;case 'metadata-run':cleanSelectedImages();break;case 'metadata-zip':downloadCleanZip();break;case 'metadata-download':downloadCleanImage(Number(el.dataset.index));break;case 'metadata-reset':resetMetadataQueue();break;case 'metadata-drive':sendCleanImagesToDrive();break;default:break}}
+function run(action,el){const type=el?.dataset.type,pid=el?.dataset.id;switch(action){case 'nav':navigate(el.dataset.page);break;case 'google-login-sync':requestGoogleToken({forLogin:true});break;case 'mobile-open':sidebarOpen=true;render();break;case 'mobile-close':sidebarOpen=false;render();break;case 'new':openModal(type,'',el.dataset.quick||'');break;case 'new-income':navigate('finances');openModal('finances','','income');break;case 'new-clients':openModal('clients');break;case 'gi-client-gallery':giOpenClientGallery(pid);break;case 'new-deals':openModal('deals');break;case 'new-projects':openModal('projects');break;case 'new-tasks':openModal('tasks');break;case 'new-scripts':openModal('scripts');break;case 'script-copy':GIRoteiros.copy(pid,{db,clientName,toast,download});break;case 'script-pdf':GIRoteiros.pdf(pid,{db,clientName,dateShort,e,toast});break;case 'edit':openModal(type,pid);break;case 'delete':removeEntity(type,pid);break;case 'modal-close':closeModal();break;case 'modal-close-bg':if(el===window.event?.target)closeModal();break;case 'show-lost':hideLost();break;case 'erase':localErase();break;case 'json-backup':download(`GI_backup_${iso()}.json`,JSON.stringify(db,null,2),'application/json;charset=utf-8');toast('Backup salvo.');break;case 'csv':exportCsv(type);break;case 'google-refresh-config':loadGoogleConfig();break;case 'google-connect':connectGoogle();break;case 'google-drive-connect':connectGoogle(true);break;case 'google-create':ensureBase();break;case 'google-upload':uploadData();break;case 'clients-sync-now':syncPendingClients();break;case 'google-download':downloadData();break;case 'project-folder':projectFolder(pid);break;case 'logout':logout();break;case 'quote-new':openQuote();break;case 'quote-edit':openQuote(pid);break;case 'quote-delete':deleteQuote(pid);break;case 'quote-print':printQuote(pid);break;case 'quote-row-add':addQuoteRow();break;case 'quote-row-remove':el.closest('tr')?.remove();updateQuoteTotals();break;case 'drive-open':openDrive(pid);break;case 'drive-up':openDrive('root');break;case 'drive-trash':trashDriveFile(pid);break;case 'drive-select':document.getElementById('drive-upload')?.click();break;case 'metadata-pick':document.getElementById('metadata-input')?.click();break;case 'metadata-run':cleanSelectedImages();break;case 'metadata-zip':downloadCleanZip();break;case 'metadata-download':downloadCleanImage(Number(el.dataset.index));break;case 'metadata-reset':resetMetadataQueue();break;case 'metadata-drive':sendCleanImagesToDrive();break;default:break}}
 document.addEventListener('click',event=>{const el=event.target.closest('[data-action]');if(!el)return;if(el.dataset.action==='modal-close-bg'&&event.target!==el)return;run(el.dataset.action,el)});
 document.addEventListener('submit',event=>{if(event.target.id==='entity-form'){event.preventDefault();persistEntity(event.target)}else if(event.target.id==='quote-form'){event.preventDefault();saveQuote(event.target)}});
 document.addEventListener('change',event=>{const el=event.target;if(el.id==='drive-upload'){uploadDrivePhotos(el.files);el.value='';}else if(el.id==='metadata-input'){addMetadataImages(el.files);el.value='';}else if(el.classList.contains('quote-item-select')){const item=el.value===''?null:SERVICE_CATALOG[Number(el.value)];const tr=el.closest('tr');if(item&&tr){tr.querySelector('[name=title]').value=item.title;tr.querySelector('[name=price]').value=item.price;}updateQuoteTotals();}else if(el.id==='scripts-filter'){GIRoteiros.setFilter(el.value);renderContent();}else if(el.id==='finance-period'){monthFilter=el.value;renderContent();}else if(el.id==='finance-type'){filter=el.value;renderContent();}else if(el.id==='auto-sync'){toast('A sincronização é automática e não pode ser desativada aqui.');}else if(el.dataset.taskToggle){const x=db.tasks.find(x=>x.id===el.dataset.taskToggle);if(x){x.done=el.checked;x.updatedAt=new Date().toISOString();save();renderContent();toast(x.done?'Tarefa concluída.':'Tarefa reaberta.')}}});
