@@ -1,0 +1,33 @@
+{
+  "id": "/",
+  "name": "G&I Central | Gestão da Agência",
+  "short_name": "G&I Central",
+  "description": "CRM, projetos, financeiro e galeria de artes da G&I Agência.",
+  "lang": "pt-BR",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#081722",
+  "theme_color": "#081722",
+  "orientation": "any",
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "/icons/icon-192.png?v=2",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png?v=2",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": [
+    "business",
+    "productivity"
+  ]
+}
