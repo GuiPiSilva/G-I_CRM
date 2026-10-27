@@ -1,17 +1,92 @@
 // G&I Agência: links públicos para receber arquivos diretamente nas pastas privadas do Drive.
 // Secrets and Drive OAuth tokens exist only in Vercel environment variables.
 const crypto=require('node:crypto');
-const LIMIT=100*1024*1024;
-const CHUNK=1024*1024;
+const LIMIT=10*1024*1024*1024; // 10 GiB
+const CHUNK=4*1024*1024; // abaixo de 4.5 MB da Vercel
+const ALIGN=256*1024; // blocos Drive
 const ROOT=process.env.GI_UPLOADS_PARENT_FOLDER_ID||'1XNm3H5jIehlIzaXGYG5KDJgSgn72Q9Rq';
-const ALLOWED=new Map([
- ['image/jpeg',['jpg','jpeg']],['image/png',['png']],['image/webp',['webp']],
- ['image/heic',['heic']],['image/heif',['heif']],
- ['application/pdf',['pdf']],['application/zip',['zip']],
- ['video/mp4',['mp4']],['video/quicktime',['mov']],
- ['application/vnd.openxmlformats-officedocument.wordprocessingml.document',['docx']],
- ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',['xlsx']]
-]);
+const EXT_MIME=Object.freeze({
+ "mp4": "video/mp4",
+ "m4v": "video/mp4",
+ "mov": "video/quicktime",
+ "mkv": "video/x-matroska",
+ "webm": "video/webm",
+ "avi": "video/x-msvideo",
+ "wmv": "video/x-ms-wmv",
+ "mxf": "application/mxf",
+ "mts": "video/mp2t",
+ "m2ts": "video/mp2t",
+ "ts": "video/mp2t",
+ "mpg": "video/mpeg",
+ "mpeg": "video/mpeg",
+ "vob": "video/dvd",
+ "3gp": "video/3gpp",
+ "jpg": "image/jpeg",
+ "jpeg": "image/jpeg",
+ "png": "image/png",
+ "webp": "image/webp",
+ "heic": "image/heic",
+ "heif": "image/heif",
+ "tif": "image/tiff",
+ "tiff": "image/tiff",
+ "bmp": "image/bmp",
+ "gif": "image/gif",
+ "svg": "image/svg+xml",
+ "avif": "image/avif",
+ "dng": "image/x-adobe-dng",
+ "cr2": "image/x-canon-cr2",
+ "nef": "image/x-nikon-nef",
+ "arw": "image/x-sony-arw",
+ "psd": "image/vnd.adobe.photoshop",
+ "pdf": "application/pdf",
+ "ai": "application/pdf",
+ "eps": "application/postscript",
+ "mp3": "audio/mpeg",
+ "wav": "audio/wav",
+ "wave": "audio/wav",
+ "aiff": "audio/aiff",
+ "aif": "audio/aiff",
+ "m4a": "audio/mp4",
+ "aac": "audio/aac",
+ "flac": "audio/flac",
+ "ogg": "audio/ogg",
+ "opus": "audio/opus",
+ "wma": "audio/x-ms-wma",
+ "mid": "audio/midi",
+ "midi": "audio/midi",
+ "txt": "text/plain",
+ "edl": "text/plain",
+ "srt": "text/plain",
+ "vtt": "text/vtt",
+ "csv": "text/csv",
+ "rtf": "application/rtf",
+ "doc": "application/msword",
+ "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+ "xls": "application/vnd.ms-excel",
+ "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+ "ppt": "application/vnd.ms-powerpoint",
+ "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+ "xml": "application/xml",
+ "zip": "application/zip",
+ "rar": "application/vnd.rar",
+ "7z": "application/x-7z-compressed",
+ "tar": "application/x-tar",
+ "gz": "application/gzip",
+ "braw": "application/octet-stream",
+ "r3d": "application/octet-stream",
+ "cr3": "application/octet-stream",
+ "raf": "application/octet-stream",
+ "rw2": "application/octet-stream",
+ "orf": "application/octet-stream",
+ "psb": "application/octet-stream",
+ "indd": "application/octet-stream",
+ "prproj": "application/octet-stream",
+ "aep": "application/octet-stream",
+ "drp": "application/octet-stream",
+ "drb": "application/octet-stream",
+ "veg": "application/octet-stream",
+ "blend": "application/octet-stream"
+});
 const secret=()=>process.env.GI_SESSION_SECRET||'';
 const configured=()=>!!(secret()&&process.env.GOOGLE_CLIENT_ID&&process.env.GOOGLE_CLIENT_SECRET&&process.env.GI_DRIVE_REFRESH_TOKEN);
 const fail=(res,code,message)=>res.status(code).json({error:message});
@@ -38,20 +113,24 @@ function sameOrigin(req){
 }
 const validFolder=id=>typeof id==='string'&&/^[a-zA-Z0-9_-]{10,160}$/.test(id);
 const cleanName=name=>String(name||'').normalize('NFC').replace(/[\/\\<>:"|?*\x00-\x1f]/g,'_').replace(/^\.+/,'').trim().slice(0,130);
-function safeFile(name,type,size){
- if(!Number.isSafeInteger(size)||size<1||size>LIMIT||!ALLOWED.has(type))return null;
+function safeFile(name,size){
+ if(!Number.isSafeInteger(size)||size<1||size>LIMIT)return null;
  const file=cleanName(name),ext=file.split('.').pop().toLowerCase();
- return file.length>=3&&ALLOWED.get(type).includes(ext)?file:null;
+ return file.length>=3&&Object.hasOwn(EXT_MIME,ext)?{name:file,mime:EXT_MIME[ext]}:null;
 }
 async function raw(req,max){
  const parts=[];let length=0;
  for await(const part of req){length+=part.length;if(length>max)throw Error('too_large');parts.push(part)}
  return Buffer.concat(parts);
 }
+let cachedGoogleToken='',cachedGoogleTokenUntil=0;
 async function googleToken(){
+ if(cachedGoogleToken&&Date.now()<cachedGoogleTokenUntil)return cachedGoogleToken;
  const body=new URLSearchParams({client_id:process.env.GOOGLE_CLIENT_ID||'',client_secret:process.env.GOOGLE_CLIENT_SECRET||'',refresh_token:process.env.GI_DRIVE_REFRESH_TOKEN||'',grant_type:'refresh_token'});
  const r=await fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body,signal:AbortSignal.timeout(15000)});
- if(!r.ok)throw Error('oauth');const j=await r.json();if(!j.access_token)throw Error('oauth');return j.access_token;
+ if(!r.ok)throw Error('oauth');const j=await r.json();if(!j.access_token)throw Error('oauth');
+ cachedGoogleToken=j.access_token;cachedGoogleTokenUntil=Date.now()+Math.max(60,Number(j.expires_in||3600)-120)*1000;
+ return cachedGoogleToken;
 }
 async function driveFolder(token,id){
  const u='https://www.googleapis.com/drive/v3/files/'+encodeURIComponent(id)+'?fields=id,mimeType,parents,trashed&supportsAllDrives=true';
@@ -69,10 +148,10 @@ const handler=async(req,res)=>{
  if(req.method==='GET'){
   if(url.searchParams.get('admin')==='1'){
    if(!owner(req))return fail(res,401,'Acesse o CRM para continuar.');
-   return res.status(200).json({configured:configured(),maxMb:100,chunkSize:CHUNK});
+   return res.status(200).json({configured:configured(),maxBytes:LIMIT,chunkSize:CHUNK});
   }
   const p=checkLink(url.searchParams.get('t'));if(!p)return fail(res,410,'Este link expirou ou é inválido.');
-  return res.status(200).json({client:p.name,expiresAt:new Date(p.exp).toISOString(),maxMb:100});
+  return res.status(200).json({client:p.name,expiresAt:new Date(p.exp).toISOString(),maxBytes:LIMIT,chunkSize:CHUNK});
  }
  if(!sameOrigin(req))return fail(res,403,'Origem não autorizada.');
  const action=url.searchParams.get('action');
@@ -82,7 +161,7 @@ const handler=async(req,res)=>{
   const match=/^bytes (\d+)-(\d+)\/(\d+)$/.exec(req.headers['content-range']||'');
   if(!match)return fail(res,400,'Intervalo de arquivo inválido.');
   const start=Number(match[1]),end=Number(match[2]),total=Number(match[3]);
-  if(total!==session.n||end<start||end>=total||start%CHUNK!==0||(end+1<total&&(end-start+1)!==CHUNK)||end-start+1>CHUNK)return fail(res,400,'Bloco inválido.');
+  if(total!==session.n||end<start||end>=total||start%ALIGN!==0||(end+1<total&&(end-start+1)%ALIGN!==0)||end-start+1>CHUNK)return fail(res,400,'Bloco inválido.');
   let bytes;
   try{bytes=await raw(req,CHUNK)}catch{return fail(res,413,'Bloco grande demais.')}
   if(bytes.length!==end-start+1)return fail(res,400,'Tamanho do bloco incorreto.');
@@ -111,12 +190,34 @@ const handler=async(req,res)=>{
   const t=issue('link',{v:1,fid,name,exp,nonce:crypto.randomBytes(16).toString('base64url')});
   return res.status(200).json({token:t,expiresAt:new Date(exp).toISOString()});
  }
+ if(action==='status'){
+  const session=parse('session',body.session);
+  if(!session||!configured()||!Number.isSafeInteger(session.n)||session.n<1||session.n>LIMIT||
+     !/^https:\/\/www\.googleapis\.com\/upload\/drive\/v3\/files\?/.test(session.u))
+    return fail(res,403,'Sessão de envio expirada ou inválida.');
+  try{
+   const token=await googleToken();
+   const r=await fetch(session.u,{method:'PUT',headers:{
+     Authorization:'Bearer '+token,'Content-Length':'0','Content-Range':'bytes */'+session.n
+   },signal:AbortSignal.timeout(20000),redirect:'manual'});
+   if(r.status===308){
+    const range=/^bytes=0-(\d+)$/.exec(r.headers.get('range')||'');
+    const next=range?Number(range[1])+1:0;
+    if(!Number.isSafeInteger(next)||next<0||next>session.n)throw Error('bad_range');
+    return res.status(200).json({done:false,next});
+   }
+   if(r.ok)return res.status(200).json({done:true,next:session.n});
+   if(r.status===404)return fail(res,410,'A sessão expirou. Selecione o arquivo e recomece.');
+   throw Error('status_failed');
+  }catch{return fail(res,502,'Não foi possível verificar o progresso no Drive.');}
+ }
  if(action==='start'){
   const p=checkLink(body.token);
   if(!p)return fail(res,410,'Link inválido ou expirado.');
   if(!configured())return fail(res,503,'O recebimento de arquivos está temporariamente indisponível.');
-  const type=String(body.type||''),size=Number(body.size),name=safeFile(body.name,type,size);
-  if(!name)return fail(res,400,'Formato não permitido ou arquivo maior que 100 MB.');
+  const size=Number(body.size),file=safeFile(body.name,size);
+  if(!file)return fail(res,400,'Formato não permitido ou arquivo maior que 10 GB.');
+  const {name,mime:type}=file;
   try{
    const token=await googleToken();
    const meta={name,parents:[p.fid],description:'Recebido pelo link público de envio G&I Central'};
@@ -126,7 +227,7 @@ const handler=async(req,res)=>{
    });
    const location=r.headers.get('location');
    if(!r.ok||!location||!/^https:\/\/www\.googleapis\.com\/upload\/drive\/v3\/files\?/.test(location))throw Error('drive_session');
-   return res.status(200).json({session:issue('session',{u:location,n:size,type,exp:Math.min(p.exp,Date.now()+60*60000)}),chunkSize:CHUNK});
+   return res.status(200).json({session:issue('session',{u:location,n:size,type,exp:Math.min(p.exp,Date.now()+24*60*60000)}),chunkSize:CHUNK});
   }catch{return fail(res,502,'Não foi possível iniciar o envio no Google Drive.')}
  }
  return fail(res,400,'Ação desconhecida.');

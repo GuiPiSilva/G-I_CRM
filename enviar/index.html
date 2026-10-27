@@ -21,6 +21,9 @@ h1{font-size:clamp(28px,6vw,40px);line-height:1.1;letter-spacing:-1.4px;margin:1
 .drop.drag{border-color:#015475;background:#eaf6fc}.drop strong{display:block;font-size:17px}.drop small{display:block;color:#708999;margin-top:6px;font-size:12px}.drop svg{display:block;margin:0 auto 12px}
 button{font:inherit;cursor:pointer}button.primary{background:#045776;color:#fff;border:none;border-radius:12px;padding:15px 22px;font-weight:800;width:100%;margin-top:18px}
 button:disabled{cursor:not-allowed;opacity:.5}
+.controls{display:flex;align-items:stretch;gap:10px}.controls button.primary{flex:1;min-width:0}
+button.pause{border:1px solid #aec8d5;color:#055777;background:#fff;border-radius:12px;padding:12px 15px;font-weight:800;margin-top:18px}
+
 .list{margin:18px 0}.item{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e9eff3;padding:9px 0;gap:12px;min-width:0;font-size:13px}.item span{overflow-wrap:anywhere}.item em{flex:0 0 auto;color:#6c8491;font-style:normal;font-size:12px}
 .msg{font-size:13px;padding:12px 14px;background:#eff7fb;border-radius:12px;color:#15536e;margin-top:18px}
 .msg.error{background:#fff0ef;color:#ac302b}.msg.ok{background:#e8f8ef;color:#176447}
@@ -40,14 +43,14 @@ footer{font-size:11px;color:#8b9daa;text-align:center;padding:22px}.expires{font
 <form id="form" class="hide">
 <label class="drop" id="drop" for="files">
 <svg aria-hidden="true" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#045776" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V3m-5 5 5-5 5 5"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>
-<strong>Toque para selecionar os arquivos</strong><small>Ou arraste para cá. Até 100 MB por arquivo.</small>
+<strong>Toque para selecionar os arquivos</strong><small>Ou arraste para cá. Vídeos 4K, RAW, áudio e projetos, até 10 GB por arquivo.</small>
 </label>
-<input id="files" type="file" multiple class="hide" accept=".jpg,.jpeg,.png,.webp,.heic,.heif,.pdf,.docx,.xlsx,.zip,.mp4,.mov,image/*,application/pdf">
+<input id="files" type="file" multiple class="hide">
 <div id="list" class="list" aria-live="polite"></div>
-<button class="primary" type="submit" id="send" disabled>Enviar para a G&I</button>
-<progress class="hide" id="progress" value="0" max="100"></progress>
+<div class="controls"><button class="primary" type="submit" id="send" disabled>Enviar para a G&I</button><button class="pause hide" type="button" id="pause">Pausar</button></div>
+<progress class="hide" id="progress" value="0" max="100"></progress><div class="expires hide" id="progress-text" aria-live="polite"></div>
 <div id="message" class="msg hide" role="status" aria-live="polite"></div>
-<div class="expires" id="expiration"></div>
+<div class="expires" id="expiration"></div><p class="expires">Arquivos de vídeo 4K podem levar bastante tempo. Mantenha esta página aberta até a confirmação de entrega. A pausa funciona enquanto a página permanecer aberta.</p>
 </form>
 </main>
 <footer>G&I Agência · Seus arquivos são enviados para uma pasta privada da agência.</footer>
@@ -57,18 +60,20 @@ footer{font-size:11px;color:#8b9daa;text-align:center;padding:22px}.expires{font
 'use strict';
 const $=id=>document.getElementById(id);
 const token=new URL(location.href).searchParams.get('t')||'';
-const allowed={'jpg':'image/jpeg','jpeg':'image/jpeg','png':'image/png','webp':'image/webp','heic':'image/heic','heif':'image/heif','pdf':'application/pdf','zip':'application/zip','mp4':'video/mp4','mov':'video/quicktime','docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'};
-const limit=100*1024*1024;
-const size=x=>x>=1048576?(x/1048576).toFixed(1)+' MB':Math.max(1,Math.round(x/1024))+' KB';
-let busy=false,usable=false;
+const allowed=Object.freeze({"mp4":"video/mp4","m4v":"video/mp4","mov":"video/quicktime","mkv":"video/x-matroska","webm":"video/webm","avi":"video/x-msvideo","wmv":"video/x-ms-wmv","mxf":"application/mxf","mts":"video/mp2t","m2ts":"video/mp2t","ts":"video/mp2t","mpg":"video/mpeg","mpeg":"video/mpeg","vob":"video/dvd","3gp":"video/3gpp","jpg":"image/jpeg","jpeg":"image/jpeg","png":"image/png","webp":"image/webp","heic":"image/heic","heif":"image/heif","tif":"image/tiff","tiff":"image/tiff","bmp":"image/bmp","gif":"image/gif","svg":"image/svg+xml","avif":"image/avif","dng":"image/x-adobe-dng","cr2":"image/x-canon-cr2","nef":"image/x-nikon-nef","arw":"image/x-sony-arw","psd":"image/vnd.adobe.photoshop","pdf":"application/pdf","ai":"application/pdf","eps":"application/postscript","mp3":"audio/mpeg","wav":"audio/wav","wave":"audio/wav","aiff":"audio/aiff","aif":"audio/aiff","m4a":"audio/mp4","aac":"audio/aac","flac":"audio/flac","ogg":"audio/ogg","opus":"audio/opus","wma":"audio/x-ms-wma","mid":"audio/midi","midi":"audio/midi","txt":"text/plain","edl":"text/plain","srt":"text/plain","vtt":"text/vtt","csv":"text/csv","rtf":"application/rtf","doc":"application/msword","docx":"application/vnd.openxmlformats-officedocument.wordprocessingml.document","xls":"application/vnd.ms-excel","xlsx":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","ppt":"application/vnd.ms-powerpoint","pptx":"application/vnd.openxmlformats-officedocument.presentationml.presentation","xml":"application/xml","zip":"application/zip","rar":"application/vnd.rar","7z":"application/x-7z-compressed","tar":"application/x-tar","gz":"application/gzip","braw":"application/octet-stream","r3d":"application/octet-stream","cr3":"application/octet-stream","raf":"application/octet-stream","rw2":"application/octet-stream","orf":"application/octet-stream","psb":"application/octet-stream","indd":"application/octet-stream","prproj":"application/octet-stream","aep":"application/octet-stream","drp":"application/octet-stream","drb":"application/octet-stream","veg":"application/octet-stream","blend":"application/octet-stream"} );
+$('files').accept=Object.keys(allowed).map(ext=>'.'+ext).join(',');
+const limit=10*1024*1024*1024;
+const size=x=>x>=1073741824?(x/1073741824).toFixed(2)+' GB':x>=1048576?(x/1048576).toFixed(1)+' MB':Math.max(1,Math.round(x/1024))+' KB';
+let busy=false,usable=false,paused=false,unpause=null;
+const waitIfPaused=()=>paused?new Promise(resolve=>{unpause=resolve;}):Promise.resolve();
 function message(text,error=false,ok=false){const m=$('message');m.textContent=text;m.className='msg'+(error?' error':ok?' ok':'');}
 function mime(f){const ext=(f.name.split('.').pop()||'').toLowerCase();return allowed[ext]||'';}
-function filesSelected(){
+function filesSelected(clearMessage=true){
  const files=Array.from($('files').files||[]);
  $('list').replaceChildren();
  for(const f of files){const div=document.createElement('div');div.className='item';const name=document.createElement('span');name.textContent=f.name;const meta=document.createElement('em');const valid=!!mime(f)&&f.size>0&&f.size<=limit;meta.textContent=size(f.size)+(valid?'':' · não permitido');if(!valid)meta.style.color='#b83431';div.append(name,meta);$('list').append(div);}
  $('send').disabled=!usable||busy||!files.length||files.length>10||files.some(f=>!mime(f)||f.size>limit||f.size<1);
- if(files.length>10)message('Selecione no máximo 10 arquivos por envio.',true);else $('message').className='hide';
+ if(files.length>10)message('Selecione no máximo 10 arquivos por envio.',true);else if(clearMessage)$('message').className='hide';
 }
 async function json(url,options={}){
  const r=await fetch(url,{cache:'no-store',...options});let j;try{j=await r.json()}catch{j={}}if(!r.ok)throw Error(j.error||'Falha de conexão.');return j;
@@ -76,6 +81,7 @@ async function json(url,options={}){
 async function init(){
  try{
   const d=await json('/api/client-upload?t='+encodeURIComponent(token));
+  if(Number.isFinite(d.maxBytes)&&d.maxBytes<limit)throw Error('O limite de arquivos no servidor não está atualizado.');
   $('loading').className='hide';$('client').textContent='Cliente: '+d.client;$('client').classList.remove('hide');
   $('expiration').textContent='Link válido até '+new Date(d.expiresAt).toLocaleString('pt-BR')+'.';
   $('form').classList.remove('hide');usable=true;
@@ -83,18 +89,38 @@ async function init(){
 }
 async function sendFile(file,onProgress){
  const d=await json('/api/client-upload?action=start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,name:file.name,type:mime(file),size:file.size})});
- let offset=0;let attempts=0;
+ let offset=0,attempts=0;
  while(offset<file.size){
+  await waitIfPaused();
   const end=Math.min(offset+d.chunkSize,file.size);
   try{
    const r=await json('/api/client-upload?action=chunk',{method:'POST',headers:{'X-GI-Upload-Session':d.session,'Content-Type':'application/octet-stream','Content-Range':'bytes '+offset+'-'+(end-1)+'/'+file.size},body:file.slice(offset,end)});
    const next=r.done?file.size:r.next;
    if(!Number.isSafeInteger(next)||next<=offset||next>file.size)throw Error('Resposta de transferência inválida.');
    offset=next;attempts=0;onProgress(offset);
-  }catch(e){if(++attempts>=3)throw e;await new Promise(resolve=>setTimeout(resolve,attempts*1200));}
+  }catch(err){
+   if(++attempts>=6)throw Error('Falha após várias tentativas. '+err.message);
+   try{
+    const r=await json('/api/client-upload?action=status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:d.session})});
+    if(r.done){onProgress(file.size);return;}
+    if(Number.isSafeInteger(r.next)&&r.next>=0&&r.next<=file.size){
+     if(r.next!==offset){offset=r.next;onProgress(offset);attempts=0;}
+    }
+   }catch(statusError){
+    if(/expirou|expirada|inválida/i.test(statusError.message))throw statusError;
+   }
+   await new Promise(resolve=>setTimeout(resolve,Math.min(10000,attempts*1800)));
+  }
  }
 }
 $('files').addEventListener('change',filesSelected);
+$('pause').addEventListener('click',()=>{
+ if(!busy)return;
+ paused=!paused;
+ $('pause').textContent=paused?'Continuar':'Pausar';
+ if(!paused&&unpause){const resolve=unpause;unpause=null;resolve();}
+ if(paused)message('Envio pausado. Clique em Continuar para retomar.');
+});
 const drop=$('drop');
 drop.addEventListener('dragover',e=>{e.preventDefault();drop.classList.add('drag');});
 drop.addEventListener('dragleave',()=>drop.classList.remove('drag'));
@@ -103,15 +129,25 @@ $('form').addEventListener('submit',async e=>{
  e.preventDefault();if(busy||!usable)return;
  const list=Array.from($('files').files||[]);
  if(!list.length||list.length>10||list.some(f=>!mime(f)||f.size<1||f.size>limit))return;
- busy=true;filesSelected();$('files').disabled=true;$('progress').value=0;$('progress').classList.remove('hide');
+ busy=true;paused=false;filesSelected(false);$('files').disabled=true;$('progress').value=0;$('progress').classList.remove('hide');
+ $('pause').classList.remove('hide');$('pause').textContent='Pausar';$('progress-text').classList.remove('hide');
  const total=list.reduce((n,f)=>n+f.size,0);let completed=0;let success=0;
  for(const file of list){
   message('Enviando '+file.name+'...');
-  try{await sendFile(file,sent=>$('progress').value=Math.min(100,Math.floor((completed+sent)/total*100)));completed+=file.size;success++;}
+  try{
+   const started=Date.now();
+   await sendFile(file,sent=>{
+    const pct=Math.min(100,Math.floor((completed+sent)/total*100));
+    $('progress').value=pct;
+    const rate=sent/Math.max(1,(Date.now()-started)/1000);
+    $('progress-text').textContent=pct+'% do lote · '+size(completed+sent)+' de '+size(total)+(rate>0?' · '+size(rate)+'/s':'');
+   });
+   completed+=file.size;success++;
+  }
   catch(err){message(success+' arquivo(s) enviado(s). Falha em "'+file.name+'": '+err.message,true);break;}
  }
  if(success===list.length){message(success+' arquivo(s) entregue(s) com sucesso à G&I!',false,true);$('files').value='';$('progress').value=100;}
- $('files').disabled=false;busy=false;filesSelected();
+ $('files').disabled=false;busy=false;paused=false;if(unpause){unpause();unpause=null;}$('pause').classList.add('hide');filesSelected(false);
  if(success===list.length)message(success+' arquivo(s) entregue(s) com sucesso à G&I!',false,true);
 });
 init();
